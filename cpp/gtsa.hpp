@@ -48,7 +48,7 @@ struct Random {
     virtual ~Random() {}
 
     int uniform(int min, int max) const {
-        mt19937 engine;
+        static mt19937 engine;
         uniform_int_distribution<int> distribution(min, max);
         return distribution(engine);
     }
