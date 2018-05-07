@@ -45,11 +45,11 @@ static const int MAX_DEPTH = 20;
 static const int INF = 2147483647;
 
 struct Random {
+    mt19937 engine;
 
     virtual ~Random() {}
 
-    int uniform(int min, int max) const {
-        static mt19937 engine;
+    int uniform(int min, int max) {
         uniform_int_distribution<int> distribution(min, max);
         return distribution(engine);
     }
@@ -552,7 +552,6 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
     const int max_simulations;
     const int num_cpus;
     const bool block;
-    const Random random;
 
     MonteCarloTreeSearch(double max_seconds = 1,
                          int max_simulations = MAX_SIMULATIONS,
@@ -572,27 +571,29 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
         }
         int simulation = 0;
 
-        vector<S> clones(num_cpus, root->clone());
-        vector<future<int>> results;
+        vector<S> clones;
+        vector<future<pair<int, S>>> results;
 
         for (int i = 0; i < num_cpus; ++i) {
-            auto& clone = clones[i];
-            results.push_back(async(launch::async, [this, &clone] (int max_simulations) {
+            results.push_back(async(launch::async, [this, root, i] (int max_simulations) {
                 Timer timer;
                 timer.start();
                 int simulation = 0;
+                S clone = root->clone();
 
                 while (simulation < max_simulations && !timer.exceeded(max_seconds)) {
                     monte_carlo_tree_search(&clone);
                     ++simulation;
                 }
 
-                return simulation;
+                return make_pair(simulation, clone);
             }, ceil((float) max_simulations / num_cpus)));
         }
 
         for (int i = 0; i < num_cpus; ++i) {
-            simulation += results[i].get();
+            auto result = results[i].get();
+            simulation += result.first;
+            clones.push_back(result.second);
         }
 
         this->log << "simulations: " << simulation << endl;
@@ -623,8 +624,9 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
     }
 
     void monte_carlo_tree_search(S *root) const {
+        Random random;
         S *current = tree_policy(root, root);
-        const auto result = rollout(current, root);
+        const auto result = rollout(current, root, random);
         propagate_up(current, result);
     }
 
@@ -738,7 +740,7 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
         return best_move;
     }
 
-    M get_random_move(const S *state) const {
+    M get_random_move(const S *state, Random& random) const {
         const auto legal_moves = state->get_legal_moves();
         assert(legal_moves.size() > 0);
         const int index = random.uniform(0, legal_moves.size() - 1);
@@ -784,7 +786,7 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
         return get_best_move(state, root);
     }
 
-    M get_default_policy_move(const S *state) const {
+    M get_default_policy_move(const S *state, Random& random) const {
         // If player has a winning move he makes it.
         auto move_ptr = get_winning_move(state);
         if (move_ptr != nullptr) {
@@ -795,10 +797,10 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
         if (move_ptr != nullptr) {
             return *move_ptr;
         }
-        return get_random_move(state);
+        return get_random_move(state, random);
     }
 
-    double rollout(S *current, const S *root) const {
+    double rollout(S *current, const S *root, Random& random) const {
         if (current->is_terminal()) {
             if (current->is_winner(root->player_to_move)) {
                 return WIN_SCORE;
@@ -808,9 +810,9 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
             }
             return DRAW_SCORE;
         }
-        M move = get_default_policy_move(current);
+        M move = get_default_policy_move(current, random);
         current->make_move(move);
-        auto result = rollout(current, root);
+        auto result = rollout(current, root, random);
         current->undo_move(move);
         return result;
     }
