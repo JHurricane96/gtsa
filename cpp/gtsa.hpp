@@ -23,6 +23,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 #include <unordered_set>
 #include <sys/time.h>
 #include <algorithm>
+#include <future>
 #include <iostream>
 #include <assert.h>
 #include <fstream>
@@ -549,16 +550,19 @@ template<class S, class M>
 struct MonteCarloTreeSearch : public Algorithm<S, M> {
     const double max_seconds;
     const int max_simulations;
+    const int num_cpus;
     const bool block;
     const Random random;
 
     MonteCarloTreeSearch(double max_seconds = 1,
                          int max_simulations = MAX_SIMULATIONS,
+                         int num_cpus = 1,
                          bool block = false) :
         Algorithm<S, M>(),
         max_seconds(max_seconds),
         block(block),
-        max_simulations(max_simulations) {}
+        max_simulations(max_simulations),
+        num_cpus(min(num_cpus, max_simulations)) {}
 
     M get_move(const S *root) override {
         if (root->is_terminal()) {
@@ -566,29 +570,56 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
             root->to_stream(stream);
             throw invalid_argument("Given state is terminal:\n" + stream.str());
         }
-        Timer timer;
-        timer.start();
         int simulation = 0;
-        S clone = root->clone();
-        while (simulation < max_simulations && !timer.exceeded(max_seconds)) {
-            monte_carlo_tree_search(&clone);
-            ++simulation;
+
+        vector<S> clones(num_cpus, root->clone());
+        vector<future<int>> results;
+
+        for (int i = 0; i < num_cpus; ++i) {
+            auto& clone = clones[i];
+            results.push_back(async(launch::async, [this, &clone] (int max_simulations) {
+                Timer timer;
+                timer.start();
+                int simulation = 0;
+
+                while (simulation < max_simulations && !timer.exceeded(max_seconds)) {
+                    monte_carlo_tree_search(&clone);
+                    ++simulation;
+                }
+
+                return simulation;
+            }, ceil((float) max_simulations / num_cpus)));
         }
-        this->log << "ratio: " << root->score / root->visits << endl;
+
+        for (int i = 0; i < num_cpus; ++i) {
+            simulation += results[i].get();
+        }
+
         this->log << "simulations: " << simulation << endl;
-        const auto legal_moves = root->get_legal_moves();
-        this->log << "moves: " << legal_moves.size() << endl;
-        for (const auto move : legal_moves) {
-            this->log << "move: " << move;
-            const auto child = root->get_child(move);
-            if (child != nullptr) {
-                this->log << " score: " << child->score
-                << " visits: " << child->visits
-                << " UCT: " << child->get_uct(UCT_C);
-            }
-            this->log << endl;
-        }
-        return get_most_visited_move(&clone);
+
+        return get_most_visited_move(clones);
+
+        // while (simulation < max_simulations && !timer.exceeded(max_seconds)) {
+        //     monte_carlo_tree_search(&clone);
+        //     ++simulation;
+        // }
+        // this->log << "score: " << clone.score << endl;
+        // this->log << "visits: " << clone.visits << endl;
+        // this->log << "ratio: " << clone.score / clone.visits << endl;
+        // this->log << "simulations: " << simulation << endl;
+        // const auto legal_moves = clone.get_legal_moves();
+        // this->log << "moves: " << legal_moves.size() << endl;
+        // for (const auto move : legal_moves) {
+        //     this->log << "move: " << move;
+        //     const auto child = clone.get_child(move);
+        //     if (child != nullptr) {
+        //         this->log << " score: " << child->score
+        //         << " visits: " << child->visits
+        //         << " UCT: " << child->get_uct(UCT_C);
+        //     }
+        //     this->log << endl;
+        // }
+        // return get_most_visited_move(&clone);
     }
 
     void monte_carlo_tree_search(S *root) const {
@@ -614,6 +645,39 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
             return state->add_child(move);
         }
         return tree_policy(child, root);
+    }
+
+    M get_most_visited_move(const vector<S>& states) const {
+        unordered_map<size_t, pair<M, double>> visits;
+        for (const auto& state : states) {
+            const auto legal_moves = state.get_legal_moves();
+            assert(legal_moves.size() > 0);
+            for (const auto move : legal_moves) {
+                const auto child = state.get_child(move);
+                if (child != nullptr) {
+                    auto move_hash = move.hash();
+                    auto visit = visits.find(move_hash);
+                    if (visit == visits.end()) {
+                        visits[move_hash] = make_pair(move, child->visits);
+                    }
+                    else {
+                        visit->second.second += child->visits;
+                    }
+                }
+            }
+        }
+
+        double max_visits = -INF;
+        M best_move;
+        for (const auto& visit : visits) {
+            if (visit.second.second > max_visits) {
+                best_move = visit.second.first;
+                max_visits = visit.second.second;
+            }
+        }
+
+        assert(max_visits != -INF);
+        return best_move;
     }
 
     M get_most_visited_move(const S *state) const {
