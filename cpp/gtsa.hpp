@@ -741,10 +741,32 @@ struct MonteCarloTreeSearch : public Algorithm<S, M> {
     }
 
     M get_random_move(const S *state, Random& random) const {
-        const auto legal_moves = state->get_legal_moves();
+        S clone = state->clone();
+        const auto legal_moves = clone.get_legal_moves();
         assert(legal_moves.size() > 0);
-        const int index = random.uniform(0, legal_moves.size() - 1);
-        return legal_moves[index];
+
+        int max_score = INT_MIN;
+        vector<M> best_moves;
+        for (const auto& move : legal_moves) {
+            clone.make_move(move);
+            auto score = clone.get_goodness();
+
+            if (score > max_score) {
+                max_score = score;
+                best_moves = {move};
+            } else if (score == max_score) {
+                best_moves.push_back(move);
+            }
+
+            clone.undo_move(move);
+        }
+
+        assert(max_score > INT_MIN);
+        const int index = random.uniform(0, best_moves.size() - 1);
+        return best_moves[index];
+
+        // const int index = random.uniform(0, legal_moves.size() - 1);
+        // return legal_moves[index];
     }
 
     shared_ptr<M> get_winning_move(const S *state) const {
